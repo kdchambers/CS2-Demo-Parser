@@ -47,30 +47,43 @@
 
 #define APP_NAME "demo_parser"
 
-typedef struct DemoPacket
+typedef struct
 {
     char *data;
     u32 type;
     u32 data_size;
 } DemoPacket;
 
-typedef struct Parser
+typedef struct
 {
     u8 *data;
     size_t data_size;
     size_t pos;
 
-    DemoPacket packet;
+    // DemoPacket packet;
     char *uncompressed_buffer;
     size_t uncompressed_buffer_size;
 } Parser;
 
-typedef struct DemoHeader
+typedef struct
 {
     char magic[8];
     u32 summary_offset;
     u32 packet_offset;
 } DemoHeader;
+
+typedef struct
+{
+    u8 *data;
+    //
+    // Size in bits
+    //
+    size_t size;
+    //
+    // Position in bits
+    //
+    size_t pos;
+} Bitstream;
 
 //
 // Forward declarations
@@ -93,7 +106,14 @@ static const char *demo_command_to_string(int command);
 
 static void demo_header_to_string(DemoHeader header);
 
+static void bitstream_init(Bitstream *bitstream, u8 *data, size_t data_size_bytes);
+static Bitstream bitstream_create(u8 *data, size_t data_size_bytes);
+static u32 bitstream_read_u32(Bitstream *stream, size_t bit_count);
+
+static u32 read_valve_var_uint(Bitstream *stream);
+
 static int process_demo_packet(DemoPacket packet);
+static int handle_packet(u32 packet_id);
 
 static size_t min_uint(size_t a, size_t b);
 static size_t max_uint(size_t a, size_t b);
@@ -107,6 +127,75 @@ static void demo_header_to_string(DemoHeader header)
     log_debug("Magic:          %s\n", header.magic);
     log_debug("Summary offset: %u\n", header.summary_offset);
     log_debug("Packet offset:  %u\n", header.packet_offset);
+}
+
+static void bitstream_init(Bitstream *bitstream, u8 *data, size_t data_size_bytes)
+{
+    bitstream->data = data;
+    bitstream->size = data_size_bytes * 8;
+    bitstream->pos = 0;
+}
+
+static Bitstream bitstream_create(u8 *data, size_t data_size_bytes)
+{
+    Bitstream result = {
+        data,
+        data_size_bytes * 8,
+        0};
+    return result;
+}
+
+static u32 bitstream_read_u32(Bitstream *stream, size_t bit_count)
+{
+    assert(bit_count <= 32);
+
+    size_t byte_pos = stream->pos / 8u;
+    size_t bit_pos = stream->pos % 8u;
+    size_t dst_i = 0;
+    u32 result = 0;
+
+    for (size_t i = 0; i < bit_count; i++)
+    {
+        const u32 bit_mask = 1 << bit_pos;
+        const u32 set_bit = ((u32)stream->data[byte_pos]) & bit_mask;
+        result |= (set_bit << dst_i);
+        dst_i++;
+        //
+        // TODO: Remove branch
+        //
+        if (bit_pos == 7)
+        {
+            bit_pos = 0;
+            byte_pos++;
+        }
+        else
+        {
+            bit_pos++;
+        }
+        assert(bit_pos <= 7);
+    }
+
+    stream->pos += bit_count;
+
+    return result;
+}
+
+static u32 read_valve_var_uint(Bitstream *stream)
+{
+    u32 id = bitstream_read_u32(stream, 6);
+    switch (id & 0x30)
+    {
+    case 16:
+        id = (id & 15) | (bitstream_read_u32(stream, 4) << 4);
+        break;
+    case 32:
+        id = (id & 15) | (bitstream_read_u32(stream, 8) << 4);
+        break;
+    case 48:
+        id = (id & 15) | (bitstream_read_u32(stream, 28) << 4);
+        break;
+    }
+    return id;
 }
 
 static u32 read_varint32(const u8 *data, u32 *read)
@@ -133,9 +222,6 @@ static void parser_init(Parser *parser)
     parser->data = nullptr;
     parser->data_size = 0;
     parser->pos = 0;
-    parser->packet.data = nullptr;
-    parser->packet.data_size = 0;
-    parser->packet.type = 0;
     parser->uncompressed_buffer = nullptr;
     parser->uncompressed_buffer_size = 0;
 }
@@ -194,6 +280,8 @@ static int parser_next_packet(Parser *parser, DemoPacket *out_packet)
         // TODO: Reuse decompression buffer, resize
         //
         log_debug("Decompressing packet...\n");
+
+        assert(snappy_validate_compressed_buffer(compressed_data, size) == SNAPPY_OK);
 
         size_t required_size = 0;
         if (snappy_uncompressed_length(compressed_data, size, &required_size) != SNAPPY_OK)
@@ -301,6 +389,104 @@ static const char *demo_command_to_string(int command)
     return "Unknown";
 }
 
+static int handle_packet(u32 packet_id)
+{
+    switch (packet_id)
+    {
+    case SVC__MESSAGES__svc_ServerInfo:
+        log_info("SVC__MESSAGES__svc_ServerInfo\n");
+        break;
+    case SVC__MESSAGES__svc_FlattenedSerializer:
+        log_info("SVC__MESSAGES__svc_FlattenedSerializer\n");
+        break;
+    case SVC__MESSAGES__svc_ClassInfo:
+        log_info("SVC__MESSAGES__svc_ClassInfo\n");
+        break;
+    case SVC__MESSAGES__svc_SetPause:
+        log_info("SVC__MESSAGES__svc_SetPause\n");
+        break;
+    case SVC__MESSAGES__svc_CreateStringTable:
+        log_info("SVC__MESSAGES__svc_CreateStringTable\n");
+        break;
+    case SVC__MESSAGES__svc_UpdateStringTable:
+        log_info("SVC__MESSAGES__svc_UpdateStringTable\n");
+        break;
+    case SVC__MESSAGES__svc_VoiceInit:
+        log_info("SVC__MESSAGES__svc_VoiceInit\n");
+        break;
+    case SVC__MESSAGES__svc_VoiceData:
+        log_info("SVC__MESSAGES__svc_VoiceData\n");
+        break;
+    case SVC__MESSAGES__svc_Print:
+        log_info("SVC__MESSAGES__svc_Print\n");
+        break;
+    case SVC__MESSAGES__svc_Sounds:
+        log_info("SVC__MESSAGES__svc_Sounds\n");
+        break;
+    case SVC__MESSAGES__svc_SetView:
+        log_info("SVC__MESSAGES__svc_SetView\n");
+        break;
+    case SVC__MESSAGES__svc_ClearAllStringTables:
+        log_info("SVC__MESSAGES__svc_ClearAllStringTables\n");
+        break;
+    case SVC__MESSAGES__svc_CmdKeyValues:
+        log_info("SVC__MESSAGES__svc_CmdKeyValues\n");
+        break;
+    case SVC__MESSAGES__svc_BSPDecal:
+        log_info("SVC__MESSAGES__svc_BSPDecal\n");
+        break;
+    case SVC__MESSAGES__svc_SplitScreen:
+        log_info("SVC__MESSAGES__svc_SplitScreen\n");
+        break;
+    case SVC__MESSAGES__svc_PacketEntities:
+        log_info("SVC__MESSAGES__svc_PacketEntities\n");
+        break;
+    case SVC__MESSAGES__svc_Prefetch:
+        log_info("SVC__MESSAGES__svc_Prefetch\n");
+        break;
+    case SVC__MESSAGES__svc_Menu:
+        log_info("SVC__MESSAGES__svc_Menu\n");
+        break;
+    case SVC__MESSAGES__svc_GetCvarValue:
+        log_info("SVC__MESSAGES__svc_GetCvarValue\n");
+        break;
+    case SVC__MESSAGES__svc_StopSound:
+        log_info("SVC__MESSAGES__svc_StopSound\n");
+        break;
+    case SVC__MESSAGES__svc_PeerList:
+        log_info("SVC__MESSAGES__svc_PeerList\n");
+        break;
+    case SVC__MESSAGES__svc_PacketReliable:
+        log_info("SVC__MESSAGES__svc_PacketReliable\n");
+        break;
+    case SVC__MESSAGES__svc_HLTVStatus:
+        log_info("SVC__MESSAGES__svc_HLTVStatus\n");
+        break;
+    case SVC__MESSAGES__svc_ServerSteamID:
+        log_info("SVC__MESSAGES__svc_ServerSteamID\n");
+        break;
+    case SVC__MESSAGES__svc_FullFrameSplit:
+        log_info("SVC__MESSAGES__svc_FullFrameSplit\n");
+        break;
+    case SVC__MESSAGES__svc_RconServerDetails:
+        log_info("SVC__MESSAGES__svc_RconServerDetails\n");
+        break;
+    case SVC__MESSAGES__svc_UserMessage:
+        log_info("SVC__MESSAGES__svc_UserMessage\n");
+        break;
+    case SVC__MESSAGES__svc_Broadcast_Command:
+        log_info("SVC__MESSAGES__svc_Broadcast_Command\n");
+        break;
+    case SVC__MESSAGES__svc_HltvFixupOperatorStatus:
+        log_info("SVC__MESSAGES__svc_HltvFixupOperatorStatus\n");
+        break;
+    default:
+        log_info("Unknown packet ID\n");
+        break;
+    }
+    return 0;
+}
+
 int process_demo_packet(DemoPacket packet)
 {
     log_debug("Processing packet..\n");
@@ -309,13 +495,56 @@ int process_demo_packet(DemoPacket packet)
     case DEMO_COMMAND_FILE_HEADER:
     {
         CDemoFileHeader *file_header = cdemo_file_header__unpack(nullptr, packet.data_size, (u8 *)packet.data);
-        log_info("File header:\n");
-        log_info("  Client name: %s\n", file_header->client_name);
-        log_info("  Demo file stamp: %s\n", file_header->demo_file_stamp);
-        log_info("  Game directory: %s\n", file_header->game_directory);
-        log_info("  Map name: %s\n", file_header->map_name);
-        log_info("  Server name: %s\n", file_header->server_name);
-        cdemo_file_header__free_unpacked(file_header, nullptr);
+        if (file_header)
+        {
+            log_info("File header:\n");
+            log_info("  Client name: %s\n", file_header->client_name);
+            log_info("  Demo file stamp: %s\n", file_header->demo_file_stamp);
+            log_info("  Game directory: %s\n", file_header->game_directory);
+            log_info("  Map name: %s\n", file_header->map_name);
+            log_info("  Server name: %s\n", file_header->server_name);
+            cdemo_file_header__free_unpacked(file_header, nullptr);
+        }
+        else
+        {
+            log_err("Failed to extract CDemoFileHeader\n");
+        }
+        break;
+    }
+    case DEMO_COMMAND_FILE_INFO:
+    {
+        CDemoFileInfo *proto = cdemo_file_info__unpack(nullptr, packet.data_size, (u8 *)packet.data);
+        if (proto)
+        {
+            if (proto->has_playback_frames)
+            {
+                const i32 playback_frames = proto->playback_frames;
+                log_info("  Playback frames: %d\n", playback_frames);
+            }
+
+            if (proto->has_playback_ticks)
+            {
+                const i32 playback_ticks = proto->playback_ticks;
+                log_info("  Playback ticks: %d\n", playback_ticks);
+            }
+
+            if (proto->has_playback_time)
+            {
+                const i32 playback_time = proto->playback_time;
+                log_info("  Playback time: %d\n", playback_time);
+            }
+
+            const CGameInfo *game_info = proto->game_info;
+            if (game_info)
+            {
+                log_info("  Game info:\n");
+                log_info("    Rounds count: %zu", game_info->cs->n_round_start_ticks);
+            }
+        }
+        else
+        {
+            log_err("Failed to extract CDemoFileInfo\n");
+        }
         break;
     }
     case DEMO_COMMAND_PACKET:
@@ -324,6 +553,11 @@ int process_demo_packet(DemoPacket packet)
         log_info("Packet:\n");
         log_info("  Has data: %s\n", proto->has_data ? "true" : "false");
         cdemo_packet__free_unpacked(proto, nullptr);
+
+        Bitstream bitstream = bitstream_create(proto->data.data, proto->data.len);
+        const u32 packet_id = read_valve_var_uint(&bitstream);
+        log_info("Packet ID: %u\n", packet_id);
+        handle_packet(packet_id);
         break;
     }
     case DEMO_COMMAND_CLASS_INFO:
@@ -349,7 +583,7 @@ int process_demo_packet(DemoPacket packet)
 
         u32 bytes_read = 0;
         const u32 data_size = read_varint32(proto->data.data, &bytes_read);
-        const u8* data = proto->data.data + bytes_read;
+        const u8 *data = proto->data.data + bytes_read;
 
         CSVCMsgFlattenedSerializer *flattened_serializer = csvcmsg__flattened_serializer__unpack(nullptr, data_size, data);
 
@@ -398,10 +632,10 @@ static size_t max_uint(size_t a, size_t b)
 
 static void print_usage()
 {
-    printf(APP_NAME " <input_demo_file>\n");
+    printf("Usage: " APP_NAME " <input_demo_file>\n");
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     if (argc != 2)
     {
@@ -409,7 +643,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    const char* demo_path = argv[1];
+    const char *demo_path = argv[1];
     FILE *demo_file = fopen(demo_path, "rb");
 
     if (!demo_file)
@@ -447,14 +681,23 @@ int main(int argc, char* argv[])
         DemoPacket packet;
         ret_code = parser_next_packet(&parser, &packet);
 
-        const double percent = ((double)parser.pos / (double)parser.data_size) * 100.0;
+        const double percent = (((double)parser.pos / (double)parser.data_size)) * 100.0;
         log_debug("== %zu / %zu (%f%%) ==\n", parser.pos, parser.data_size, percent);
 
         switch (ret_code)
         {
         case PARSER_NEXT_PACKET_RET_OK:
             log_info("Packet parsed. Type: %s (%d)\n", demo_command_to_string(packet.type), packet.type);
-            process_demo_packet(packet);
+            if (packet.type == DEMO_COMMAND_STOP)
+            {
+                log_info("Reached STOP message\n");
+                ret_code = PARSER_NEXT_PACKET_RET_END;
+                break;
+            }
+            else
+            {
+                process_demo_packet(packet);
+            }
             break;
         case PARSER_NEXT_PACKET_RET_DECOMPRESS_ERROR:
             log_err("Failed to decompress demo packet. Skipping\n");
